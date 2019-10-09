@@ -1,7 +1,8 @@
 from django.shortcuts import render, redirect
 from django.contrib.auth import authenticate
 from .models import (StudentProfile, TeacherProfile, Internship, Project, Committee, ResearchPaper, BeProject,
-                     Hackathon, Skill, Education, ExtraCurricular, KT, Subject, SubjectMarks, TermTest)
+                     Hackathon, Skill, Education, ExtraCurricular, KT, Subject, SubjectMarks, TermTest,
+                     CompetitiveExams, Admit)
 from .models import (HistoricalInternship, HistoricalProject, HistoricalCommittee, HistoricalResearchPaper,
                      HistoricalBeProject, HistoricalHackathon, HistoricalEducation, HistoricalExtraCurricular)
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
@@ -9,6 +10,12 @@ from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.models import User
 from django.contrib.auth.models import Permission
+from django.contrib.sites.shortcuts import get_current_site
+from django.template.loader import render_to_string
+from django.utils.encoding import force_bytes, force_text
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.core.mail import EmailMessage
+from .tokens import account_activation_token
 from django.contrib.contenttypes.models import ContentType
 from django.urls import reverse
 from django.shortcuts import get_object_or_404
@@ -47,7 +54,12 @@ def register(request):
             if User.objects.filter(username=username).exists():
                 error = 'The Sap_id is already in use by another account.'
                 return render(request, 'user_profile/registration.html', {'error': error})
-
+            elif len(Sap_Id)<11:
+                error = 'The Sap_id should be 11 digits long.'
+                return render(request, 'user_profile/registration.html', {'error': error})
+            elif len(password)<8:
+                error = 'The Password should be 8 characters long.'
+                return render(request, 'user_profile/registration.html', {'error': error})
             else:
                 user = User.objects.create_user(username=username, email=email)
                 user.set_password(password)
@@ -124,7 +136,15 @@ def register_teacher(request):
             if User.objects.filter(username=username).exists():
                 error = 'The Sap_id is already in use by another account.'
                 return render(request, 'user_profile/registration_teacher.html', {'error': error})
-
+            elif len(Sap_Id)<11:
+                error = 'The Sap_id should be 11 digits long.'
+                return render(request, 'user_profile/registration_teacher.html', {'error': error})
+            elif len(password)<8:
+                error = 'The Password should be 8 characters long.'
+                return render(request, 'user_profile/registration_teacher.html', {'error': error})
+            elif email.split('@')[1] != 'djsce.ac.in':
+                error = 'Please provide an email address with domain djsce.ac.in'
+                return render(request, 'user_profile/registration_teacher.html', {'error': error})
             else:
                 user = User.objects.create_user(username=username, email=email)
                 user.set_password(password)
@@ -162,7 +182,21 @@ def register_teacher(request):
                 permission = Permission.objects.get(
                     codename='delete_beproject', content_type=ct)
                 user.user_permissions.add(permission)
+                #Email stuff
+                user.is_active = False
                 user.save()
+                current_site = get_current_site(request)
+                mail_subject = 'Activate your account on Student Info Portal'
+                message = render_to_string('user_profile/activate_email.html', {
+                    'user': user,
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'domain': current_site.domain,
+                    'uid': urlsafe_base64_encode(force_bytes(user.pk)),
+                    'token':account_activation_token.make_token(user),
+                })
+                email_message = EmailMessage(mail_subject, message, to=[email])
+                email_message.send()
                 teacher = TeacherProfile.objects.create(
                     teacher=user, Sap_Id=Sap_Id, first_name=first_name,
                     last_name=last_name)
@@ -173,6 +207,20 @@ def register_teacher(request):
         else:
             return render(request, 'user_profile/registration_teacher.html', {})
 
+def activate(request, uidb64, token):
+    try:
+        uid = force_text(urlsafe_base64_decode(uidb64))
+        user = User.objects.get(pk=uid)
+    except(TypeError, ValueError, OverflowError, User.DoesNotExist):
+        user = None
+    if user is not None and account_activation_token.check_token(user, token):
+        user.is_active = True
+        user.save()
+        auth_login(request, user)
+        teacher_profile_url = '/teacherdashboard/'
+        return HttpResponseRedirect(teacher_profile_url)
+    else:
+        return HttpResponse('Activation link is invalid!')
 
 def user_login_teacher(request):
     if request.user.is_authenticated:
@@ -196,7 +244,7 @@ def user_login_teacher(request):
                         student_profile_url = '/login/student/'
                         return HttpResponseRedirect(student_profile_url)
                 else:
-                    error = 'Your account is disabled.'
+                    error = 'Your account is disabled. Please activate your account.'
                     return render(request, 'user_profile/teacher_login.html', {'error': error})
             else:
                 error = 'Incorrect Username or Password'
@@ -315,6 +363,8 @@ def student_profile(request, id):
         hackathon = Hackathon.objects.filter(student_profile=student)
         skill = Skill.objects.filter(user_profile=student)
         extracurricular = ExtraCurricular.objects.filter(student=student)
+        competitive = CompetitiveExams.objects.filter(student=student)
+        msadmit = Admit.objects.filter(student=student)
 
         for x, i in enumerate(gpa_list):
             sem_labels.append("Sem " + str(x + 1))
@@ -324,7 +374,8 @@ def student_profile(request, id):
                        'internship': internship, 'projects': projects, 'committe': committe,
                        'researchpaper': researchpaper, 'beproj': beproj, 'skill': skill,
                        'hackathon': hackathon, 'student': student, 'sem_labels': sem_labels,
-                       'extracurricular': extracurricular, 'flag': flag, 'logedin_user': logedin_user})
+                       'extracurricular': extracurricular, 'flag': flag, 'logedin_user': logedin_user,
+                       'competitive':competitive, 'msadmit': msadmit})
     else:
         login = '/login/student/'
         return HttpResponseRedirect(login)
@@ -339,6 +390,7 @@ def searchany(request, skillss):
         return HttpResponseRedirect(stud)
     if request.method == 'POST':
         searchquery = request.POST.get('searchany')
+        print('searchany: {}'.format(searchquery))
         # queryset=StudentProfile.objects.filter(department__trigram_similar=searchquery)
         dept_vector = SearchVector('first_name', 'last_name', 'department', 'bio', 'year', 'mobileNo', 'github_id', 'sap')
         skill_vector = SearchVector('skill')
@@ -842,21 +894,20 @@ def student_list(request):
         list_of_skills).most_common(most_common_to_take)
     skillss = [skill[0] for skill in most_frequent]
     if request.method == 'POST':
-        if request.POST.get('month'):
-            month=request.POST.get('month')
-            print(month)
-            if month:
-                month = datetime.strptime(month,'%Y-%m-%d')
-                last=month+timedelta(days=30)
-                internship_monthly = Internship.objects.filter(From__range=[month,last])
-                extracurricular_monthly = ExtraCurricular.objects.filter(date__range=[month,last])
-                hackathon_monthly = Hackathon.objects.filter(Date__range=[month,last])
-                print(internship_monthly)
-                print(hackathon_monthly)
-                print(extracurricular_monthly)
-                return render(request, 'user_profile/filter.html', {'internship_monthly': internship_monthly,'hackathon_monthly': hackathon_monthly,'extracurricular_monthly': extracurricular_monthly})
+        if request.POST.get('start_date'):
+            start_date=request.POST.get('start_date')
+            last_date=request.POST.get('last_date')
+            if start_date and last_date:
+                start_date = datetime.strptime(start_date,'%Y-%m-%d')
+                last_date = datetime.strptime(last_date,'%Y-%m-%d')
+                internship_monthly = Internship.objects.filter(From__range=[start_date,last_date])
+                extracurricular_monthly = ExtraCurricular.objects.filter(date__range=[start_date,last_date])
+                hackathon_monthly = Hackathon.objects.filter(Date__range=[start_date,last_date])
+                return render(request, 'user_profile/filter.html', {'internship_monthly': internship_monthly,'hackathon_monthly': hackathon_monthly,'extracurricular_monthly': extracurricular_monthly, 'teacher':TeacherProfile.objects.get(teacher=request.user)})
             else:
                 return searchany(request, skillss)
+        elif request.POST.get('searchany'):
+            return searchany(request, skillss)
         else:
             year = request.POST.getlist('year[]')
             skills = request.POST.getlist('skills[]')
@@ -897,144 +948,149 @@ def average(a):
 
 
 def teacher_dashboard(request):
-    try:
-        teacher = TeacherProfile.objects.get(teacher=request.user)
-    except ObjectDoesNotExist:
-        stud = '/login/student/'
-        return HttpResponseRedirect(stud)
-    context = {}
-    context['teacher'] = teacher
-    # print(teacher)
-    # calculating most common skills
-    most_common_to_take = 3
-    skills = Skill.objects.all()
-    list_of_skills = [skill.skill for skill in skills]
-    most_frequent_skills = collections.Counter(
-        list_of_skills).most_common(most_common_to_take)
-    for i, skill in enumerate(most_frequent_skills):
-        context['skill' + str(i + 1)] = skill
-    # print(most_frequent_skills)
-    # calculating year-wise internship stats
-    internship_objects = Internship.objects.all()
-    intern_stats = [
-        internship.employee.year for internship in internship_objects]
-    intern_stats = collections.Counter(intern_stats)
-    # print(intern_stats.items())
-    context['FE_interns'] = intern_stats['FE']
-    context['SE_interns'] = intern_stats['SE']
-    context['TE_interns'] = intern_stats['TE']
-    context['BE_interns'] = intern_stats['BE']
-    # internship line graph
-    internship_in_months = []
-    context['internship_in_months'] = []
-    for internship in internship_objects:
-        internship_in_months.append(internship.From.month)
-    internship_in_months = collections.Counter(internship_in_months)
-    # print(internship_in_months)
-    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    context['months'] = months
-    for month in months:
-        if months.index(month) + 1 in internship_in_months.keys():
-            context['internship_in_months'].append(internship_in_months[months.index(month) + 1])
-        else:
-            context['internship_in_months'].append(0)
-    # list of all pointers
-    sem1_list = [education.sem1_gpa for education in Education.objects.all(
-    ) if education.sem1_gpa is not None]
-    # sem1_list = filter(None, sem1_list)
-    sem2_list = [education.sem2_gpa for education in Education.objects.all(
-    ) if education.sem2_gpa is not None]
-    sem3_list = [education.sem3_gpa for education in Education.objects.all(
-    ) if education.sem3_gpa is not None]
-    sem4_list = [education.sem4_gpa for education in Education.objects.all(
-    ) if education.sem4_gpa is not None]
-    sem5_list = [education.sem5_gpa for education in Education.objects.all(
-    ) if education.sem5_gpa is not None]
-    sem6_list = [education.sem6_gpa for education in Education.objects.all(
-    ) if education.sem6_gpa is not None]
-    sem7_list = [education.sem7_gpa for education in Education.objects.all(
-    ) if education.sem7_gpa is not None]
-    sem8_list = [education.sem8_gpa for education in Education.objects.all(
-    ) if education.sem8_gpa is not None]
-    sem1_list = float(sum(sem1_list) / len(sem1_list)) if len(sem1_list) != 0 else []
-    sem2_list = float(sum(sem2_list) / len(sem2_list)) if len(sem2_list) != 0 else []
-    sem3_list = float(sum(sem3_list) / len(sem3_list)) if len(sem3_list) != 0 else []
-    sem4_list = float(sum(sem4_list) / len(sem4_list)) if len(sem4_list) != 0 else []
-    sem5_list = float(sum(sem5_list) / len(sem5_list)) if len(sem5_list) != 0 else []
-    sem6_list = float(sum(sem6_list) / len(sem6_list)) if len(sem6_list) != 0 else []
-    sem7_list = float(sum(sem7_list) / len(sem7_list)) if len(sem7_list) != 0 else []
-    sem8_list = float(sum(sem8_list) / len(sem8_list)) if len(sem8_list) != 0 else []
-    # print("Hi")
-    # print(sem1_list, sem2_list, sem3_list, sem4_list,
-    # sem5_list, sem6_list, sem7_list, sem8_list)
-    context['avg_gpa'] = [sem1_list, sem2_list, sem3_list, sem4_list, sem5_list, sem6_list, sem7_list, sem8_list]
-    context['sem_labels'] = ['Sem 1', 'Sem 2', 'Sem 3', 'Sem 4', 'Sem 5', 'Sem 6', 'Sem 7', 'Sem 8']
-    # batch wise pointers
-    FE_gpa_objects = Education.objects.filter(student_profile__year='FE')
-    SE_gpa_objects = Education.objects.filter(student_profile__year='SE')
-    TE_gpa_objects = Education.objects.filter(student_profile__year='TE')
-    BE_gpa_objects = Education.objects.filter(student_profile__year='BE')
-    # print(FE_gpa_objects, SE_gpa_objects, TE_gpa_objects, BE_gpa_objects)
-    FE_gpa = {'sem1': [], 'sem2': []}
-    SE_gpa = {'sem1': [], 'sem2': [], 'sem3': [], 'sem4': []}
-    TE_gpa = {'sem1': [], 'sem2': [], 'sem3': [], 'sem4': [], 'sem5': [], 'sem6': []}
-    BE_gpa = {'sem1': [], 'sem2': [], 'sem3': [], 'sem4': [], 'sem5': [], 'sem6': [], 'sem7': [], 'sem8': []}
-    for edu in FE_gpa_objects:
-        FE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
-        FE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
-    for edu in SE_gpa_objects:
-        SE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
-        SE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
-        SE_gpa['sem3'].append(edu.sem3_gpa if edu.sem3_gpa is not None else 0)
-        SE_gpa['sem4'].append(edu.sem4_gpa if edu.sem4_gpa is not None else 0)
-    for edu in TE_gpa_objects:
-        TE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
-        TE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
-        TE_gpa['sem3'].append(edu.sem3_gpa if edu.sem3_gpa is not None else 0)
-        TE_gpa['sem4'].append(edu.sem4_gpa if edu.sem4_gpa is not None else 0)
-        TE_gpa['sem5'].append(edu.sem5_gpa if edu.sem5_gpa is not None else 0)
-        TE_gpa['sem6'].append(edu.sem6_gpa if edu.sem6_gpa is not None else 0)
-    for edu in BE_gpa_objects:
-        BE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
-        BE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
-        BE_gpa['sem3'].append(edu.sem3_gpa if edu.sem3_gpa is not None else 0)
-        BE_gpa['sem4'].append(edu.sem4_gpa if edu.sem4_gpa is not None else 0)
-        BE_gpa['sem5'].append(edu.sem5_gpa if edu.sem5_gpa is not None else 0)
-        BE_gpa['sem6'].append(edu.sem6_gpa if edu.sem6_gpa is not None else 0)
-        BE_gpa['sem7'].append(edu.sem7_gpa if edu.sem7_gpa is not None else 0)
-        BE_gpa['sem8'].append(edu.sem8_gpa if edu.sem8_gpa is not None else 0)
-    # there's probably a better way to do this
-    context['FE_gpa'] = [average(FE_gpa['sem1']), average(FE_gpa['sem2'])]
-    context['SE_gpa'] = [average(SE_gpa['sem1']), average(SE_gpa['sem2']),
-                         average(SE_gpa['sem3']), average(SE_gpa['sem4'])]
-    context['TE_gpa'] = [average(TE_gpa['sem1']), average(TE_gpa['sem2']),
-                         average(TE_gpa['sem3']), average(TE_gpa['sem4']),
-                         average(TE_gpa['sem5']), average(TE_gpa['sem6'])]
-    context['BE_gpa'] = [average(BE_gpa['sem1']), average(BE_gpa['sem2']),
-                         average(BE_gpa['sem3']), average(BE_gpa['sem4']),
-                         average(BE_gpa['sem5']), average(BE_gpa['sem6']),
-                         average(BE_gpa['sem7']), average(BE_gpa['sem8'])]
-    # print(context['FE_gpa'])
-    # internship time stamps
-    intern_dates = [format(internship.From, 'U')
-                    for internship in Internship.objects.all()]
-    intern_dates.sort()
-    # intern_date = [int(x) - int(intern_dates[0]) for x in intern_dates]
-    # print(intern_dates)
-    # print(intern_date)
-    total_regs = StudentProfile.objects.all().count()
-    total_intern = Internship.objects.all().count()
-    cgpa1 = [pointer.cgpa for pointer in StudentProfile.objects.all(
-    ) if pointer.cgpa is not None]
-    context['total_regs'] = total_regs
-    cgpa1 = float(sum(cgpa1) / len(cgpa1)) if len(cgpa1) != 0 else 0
-    context['cgpa1'] = cgpa1
-    context['total_intern'] = total_intern
-    kt = KT.objects.all().count()
-    kt_perc = (float)((kt * 100) / total_regs)
-    context['kt_perc'] = round(kt_perc, 2)
-    # return HttpResponse(intern_stats)
-    return render(request, 'user_profile/teacherprofile.html', context)
+    if request.user.is_authenticated:
+        try:
+            teacher = TeacherProfile.objects.get(teacher=request.user)
+        except ObjectDoesNotExist:
+            stud = '/login/student/'
+            return HttpResponseRedirect(stud)
+        if not request.user.is_active:        
+            error = 'Your account is disabled. Please activate your account.'
+            return render(request, 'user_profile/teacher_login.html', {'error': error})
+        context = {}
+        context['teacher'] = teacher
+        print(teacher)
+        # calculating most common skills
+        most_common_to_take = 3
+        skills = Skill.objects.all()
+        list_of_skills = [skill.skill for skill in skills]
+        most_frequent_skills = collections.Counter(
+            list_of_skills).most_common(most_common_to_take)
+        for i, skill in enumerate(most_frequent_skills):
+            context['skill' + str(i + 1)] = skill
+        # print(most_frequent_skills)
+        # calculating year-wise internship stats
+        internship_objects = Internship.objects.all()
+        intern_stats = [
+            internship.employee.year for internship in internship_objects]
+        intern_stats = collections.Counter(intern_stats)
+        # print(intern_stats.items())
+        context['FE_interns'] = intern_stats['FE']
+        context['SE_interns'] = intern_stats['SE']
+        context['TE_interns'] = intern_stats['TE']
+        context['BE_interns'] = intern_stats['BE']
+        # internship line graph
+        internship_in_months = []
+        context['internship_in_months'] = []
+        for internship in internship_objects:
+            internship_in_months.append(internship.From.month)
+        internship_in_months = collections.Counter(internship_in_months)
+        # print(internship_in_months)
+        months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        context['months'] = months
+        for month in months:
+            if months.index(month) + 1 in internship_in_months.keys():
+                context['internship_in_months'].append(internship_in_months[months.index(month) + 1])
+            else:
+                context['internship_in_months'].append(0)
+        # list of all pointers
+        sem1_list = [education.sem1_gpa for education in Education.objects.all(
+        ) if education.sem1_gpa is not None]
+        # sem1_list = filter(None, sem1_list)
+        sem2_list = [education.sem2_gpa for education in Education.objects.all(
+        ) if education.sem2_gpa is not None]
+        sem3_list = [education.sem3_gpa for education in Education.objects.all(
+        ) if education.sem3_gpa is not None]
+        sem4_list = [education.sem4_gpa for education in Education.objects.all(
+        ) if education.sem4_gpa is not None]
+        sem5_list = [education.sem5_gpa for education in Education.objects.all(
+        ) if education.sem5_gpa is not None]
+        sem6_list = [education.sem6_gpa for education in Education.objects.all(
+        ) if education.sem6_gpa is not None]
+        sem7_list = [education.sem7_gpa for education in Education.objects.all(
+        ) if education.sem7_gpa is not None]
+        sem8_list = [education.sem8_gpa for education in Education.objects.all(
+        ) if education.sem8_gpa is not None]
+        sem1_list = float(sum(sem1_list) / len(sem1_list)) if len(sem1_list) != 0 else []
+        sem2_list = float(sum(sem2_list) / len(sem2_list)) if len(sem2_list) != 0 else []
+        sem3_list = float(sum(sem3_list) / len(sem3_list)) if len(sem3_list) != 0 else []
+        sem4_list = float(sum(sem4_list) / len(sem4_list)) if len(sem4_list) != 0 else []
+        sem5_list = float(sum(sem5_list) / len(sem5_list)) if len(sem5_list) != 0 else []
+        sem6_list = float(sum(sem6_list) / len(sem6_list)) if len(sem6_list) != 0 else []
+        sem7_list = float(sum(sem7_list) / len(sem7_list)) if len(sem7_list) != 0 else []
+        sem8_list = float(sum(sem8_list) / len(sem8_list)) if len(sem8_list) != 0 else []
+        # print("Hi")
+        # print(sem1_list, sem2_list, sem3_list, sem4_list,
+        # sem5_list, sem6_list, sem7_list, sem8_list)
+        context['avg_gpa'] = [sem1_list, sem2_list, sem3_list, sem4_list, sem5_list, sem6_list, sem7_list, sem8_list]
+        context['sem_labels'] = ['Sem 1', 'Sem 2', 'Sem 3', 'Sem 4', 'Sem 5', 'Sem 6', 'Sem 7', 'Sem 8']
+        # batch wise pointers
+        FE_gpa_objects = Education.objects.filter(student_profile__year='FE')
+        SE_gpa_objects = Education.objects.filter(student_profile__year='SE')
+        TE_gpa_objects = Education.objects.filter(student_profile__year='TE')
+        BE_gpa_objects = Education.objects.filter(student_profile__year='BE')
+        # print(FE_gpa_objects, SE_gpa_objects, TE_gpa_objects, BE_gpa_objects)
+        FE_gpa = {'sem1': [], 'sem2': []}
+        SE_gpa = {'sem1': [], 'sem2': [], 'sem3': [], 'sem4': []}
+        TE_gpa = {'sem1': [], 'sem2': [], 'sem3': [], 'sem4': [], 'sem5': [], 'sem6': []}
+        BE_gpa = {'sem1': [], 'sem2': [], 'sem3': [], 'sem4': [], 'sem5': [], 'sem6': [], 'sem7': [], 'sem8': []}
+        for edu in FE_gpa_objects:
+            FE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
+            FE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
+        for edu in SE_gpa_objects:
+            SE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
+            SE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
+            SE_gpa['sem3'].append(edu.sem3_gpa if edu.sem3_gpa is not None else 0)
+            SE_gpa['sem4'].append(edu.sem4_gpa if edu.sem4_gpa is not None else 0)
+        for edu in TE_gpa_objects:
+            TE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
+            TE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
+            TE_gpa['sem3'].append(edu.sem3_gpa if edu.sem3_gpa is not None else 0)
+            TE_gpa['sem4'].append(edu.sem4_gpa if edu.sem4_gpa is not None else 0)
+            TE_gpa['sem5'].append(edu.sem5_gpa if edu.sem5_gpa is not None else 0)
+            TE_gpa['sem6'].append(edu.sem6_gpa if edu.sem6_gpa is not None else 0)
+        for edu in BE_gpa_objects:
+            BE_gpa['sem1'].append(edu.sem1_gpa if edu.sem1_gpa is not None else 0)
+            BE_gpa['sem2'].append(edu.sem2_gpa if edu.sem2_gpa is not None else 0)
+            BE_gpa['sem3'].append(edu.sem3_gpa if edu.sem3_gpa is not None else 0)
+            BE_gpa['sem4'].append(edu.sem4_gpa if edu.sem4_gpa is not None else 0)
+            BE_gpa['sem5'].append(edu.sem5_gpa if edu.sem5_gpa is not None else 0)
+            BE_gpa['sem6'].append(edu.sem6_gpa if edu.sem6_gpa is not None else 0)
+            BE_gpa['sem7'].append(edu.sem7_gpa if edu.sem7_gpa is not None else 0)
+            BE_gpa['sem8'].append(edu.sem8_gpa if edu.sem8_gpa is not None else 0)
+        # there's probably a better way to do this
+        context['FE_gpa'] = [average(FE_gpa['sem1']), average(FE_gpa['sem2'])]
+        context['SE_gpa'] = [average(SE_gpa['sem1']), average(SE_gpa['sem2']),
+                            average(SE_gpa['sem3']), average(SE_gpa['sem4'])]
+        context['TE_gpa'] = [average(TE_gpa['sem1']), average(TE_gpa['sem2']),
+                            average(TE_gpa['sem3']), average(TE_gpa['sem4']),
+                            average(TE_gpa['sem5']), average(TE_gpa['sem6'])]
+        context['BE_gpa'] = [average(BE_gpa['sem1']), average(BE_gpa['sem2']),
+                            average(BE_gpa['sem3']), average(BE_gpa['sem4']),
+                            average(BE_gpa['sem5']), average(BE_gpa['sem6']),
+                            average(BE_gpa['sem7']), average(BE_gpa['sem8'])]
+        # print(context['FE_gpa'])
+        # internship time stamps
+        intern_dates = [format(internship.From, 'U')
+                        for internship in Internship.objects.all()]
+        intern_dates.sort()
+        # intern_date = [int(x) - int(intern_dates[0]) for x in intern_dates]
+        # print(intern_dates)
+        # print(intern_date)
+        total_regs = StudentProfile.objects.all().count()
+        total_intern = Internship.objects.all().count()
+        cgpa1 = [pointer.cgpa for pointer in StudentProfile.objects.all(
+        ) if pointer.cgpa is not None]
+        context['total_regs'] = total_regs
+        cgpa1 = float(sum(cgpa1) / len(cgpa1)) if len(cgpa1) != 0 else 0
+        context['cgpa1'] = cgpa1
+        context['total_intern'] = total_intern
+        kt = KT.objects.all().count()
+        kt_perc = (float)((kt * 100) / total_regs)
+        context['kt_perc'] = round(kt_perc, 2)
+        # return HttpResponse(intern_stats)
+        return render(request, 'user_profile/teacherprofile.html', context)
+    return HttpResponseRedirect('/login/teacher/')
 
 
 def education_graphs():
@@ -1090,6 +1146,7 @@ def show_edit_studentprofile(request):
             committee = Committee.objects.filter(employee=student_profile)
             researchpaper = ResearchPaper.objects.filter(student=student_profile)
             internship = Internship.objects.filter(employee=student_profile)
+            admit = Admit.objects.filter(student=student_profile)
             try:
                 beproject = BeProject.objects.get(student=student_profile)
             except ObjectDoesNotExist:
@@ -1098,6 +1155,10 @@ def show_edit_studentprofile(request):
                 acads = Education.objects.get(student_profile=student_profile)
             except ObjectDoesNotExist:
                 acads = Education.objects.create(student_profile=student_profile)
+            try:
+                competitive_exam = CompetitiveExams.objects.get(student=student_profile)
+            except ObjectDoesNotExist:
+                competitive_exam = CompetitiveExams.objects.create(student=student_profile)
             if not acads.sem1_tt1:
                 print('karega')
                 t = TermTest.objects.create(tt_name='sem1_tt1')
@@ -1250,10 +1311,31 @@ def show_edit_studentprofile(request):
                     skill_list.append(s)
             context = {'student_profile': student_profile, 'hackathon_list': hackathon, 'project_list': project,
                        'committee_list': committee, 'beproject': beproject, 'researchpaper_list': researchpaper,
-                       'internship_list': internship, 'acads': acads, 'skill_list': skill_list}
+                       'internship_list': internship, 'acads': acads, 'skill_list': skill_list,
+                       'competitive_exam':competitive_exam, 'admit':admit}
             return render(request, 'user_profile/edit_student_profile_2.html', context)
         else:
             return HttpResponseRedirect('/login/student/')
+
+
+def edit_competitive_exams(request, id):
+    print("aayush")
+    if request.method == 'POST':
+        print("aayush")
+        student_profile = StudentProfile.objects.get(id=id)
+        try:
+            competitive_exam = CompetitiveExams.objects.get(student=student_profile)
+        except:
+            competitive_exam = CompetitiveExams.objects.create(student=student_profile)
+        competitive_exam.gre_score = request.POST.get('gre_score')
+        competitive_exam.cat_score = request.POST.get('cat_score')
+        competitive_exam.gate_score = request.POST.get('gate_score')
+        competitive_exam.gmat_score = request.POST.get('gmat_score')
+        competitive_exam.toefl_score = request.FILES.get('toefl_score')
+        competitive_exam.mhcet_score = request.POST.get('mhcet_score')
+        competitive_exam.save()
+        print("done")
+        return HttpResponse('done')
 
 
 def edit_basic_info(request, id):
@@ -1421,7 +1503,8 @@ def edit_hackathon_info(request, id):
         hackathon = Hackathon.objects.create(student_profile=student_profile)
         # hackathon = Hackathon.objects.get(student_profile_id=id)
         hackathon.CompetitionName = request.POST.get('HackathonName')
-        hackathon.Date = request.POST.get('HackathonDate')
+        if request.POST.get('HackathonDate') != '':
+            hackathon.Date = request.POST.get('HackathonDate')
         hackathon.Desc = request.POST.get('HackathonDescription')
         hackathon.URL = request.POST.get('HackathonUrl')
         hackathon.image1 = request.FILES.get('image1')
@@ -1470,13 +1553,18 @@ def edit_internship_info(request, id):
     if request.method == 'POST':
         student_profile = StudentProfile.objects.get(id=id)
         internship = Internship.objects.create(employee=student_profile)
-
+        print("HI")
         internship.company = request.POST.get('InternshipName')
+        internship.stipend = request.POST.get('stipend')
+        print(request.POST.get('InternshipName'))
         internship.desc = request.POST.get('InternshipDescription')
+        print(request.POST.get('InternshipDescription'))
         internship.Position = request.POST.get('InternshipPosition')
         internship.Loc = request.POST.get('InternshipLocation')
-        internship.From = request.POST.get('InternshipFrom')
-        internship.To = request.POST.get('InternshipTo')
+        if request.POST.get('InternshipFrom') != '':
+            internship.From = request.POST.get('InternshipFrom')
+        if request.POST.get('InternshipTo') != '':
+            internship.To = request.POST.get('InternshipTo')
         internship.Certificate = request.FILES.get('certificate')
         internship.image1 = request.FILES.get('image1')
         internship.image2 = request.FILES.get('image2')
@@ -1484,6 +1572,7 @@ def edit_internship_info(request, id):
         internship.image4 = request.FILES.get('image4')
         internship.image5 = request.FILES.get('image5')
         internship.save()
+        print(internship.company)
         return HttpResponse('done')
     else:
         data = Internship.objects.last()
@@ -1495,18 +1584,23 @@ def edit_committee_info(request, id):
     if request.method == 'POST':
         student_profile = StudentProfile.objects.get(id=id)
         committee = Committee.objects.create(employee=student_profile)
+        print("HI")
         committee.OrganisationName = request.POST.get('CommitteeName')
+        print(request.POST.get('CommitteeName'))
         committee.YourPosition = request.POST.get('CommitteePosition')
         committee.Desc = request.POST.get('CommitteeDescription')
         committee.Loc = request.POST.get('CommitteeLocation')
-        committee.dateFrom = request.POST.get('CommitteeFrom')
-        committee.dateTo = request.POST.get('CommitteeTo')
+        if request.POST.get('CommitteeFrom') != '':
+            committee.dateFrom = request.POST.get('CommitteeFrom')
+        if request.POST.get('CommitteeTo') != '':
+            committee.dateTo = request.POST.get('CommitteeTo')
         committee.Certificate = request.FILES.get('certificate')
         committee.image1 = request.FILES.get('image1')
         committee.image2 = request.FILES.get('image2')
         committee.image3 = request.FILES.get('image3')
         committee.image4 = request.FILES.get('image4')
         committee.image5 = request.FILES.get('image5')
+        print("Yo")
         committee.save()
         return HttpResponse('done')
     else:
@@ -1518,12 +1612,14 @@ def edit_committee_info(request, id):
 
 def edit_research_paper_info(request, id):
     if request.method == 'POST':
+        print("aayush")
         student_profile = StudentProfile.objects.get(id=id)
         paper = ResearchPaper.objects.create(student=student_profile)
         paper.Title = request.POST.get('ResearchPaperName')
         paper.Publication = request.POST.get('ResearchPaperPublication')
-        paper.DateOfPublication = request.POST.get('ResearchPaperDate')
         paper.Desc = request.POST.get('ResearchPaperDescription')
+        paper.isbn = request.POST.get('isbn')
+        paper.status = request.POST.get('status')
         paper.LinkToPaper = request.POST.get('ResearchPaperUrl')
         paper.image1 = request.FILES.get('image1')
         paper.image2 = request.FILES.get('image2')
@@ -1531,6 +1627,7 @@ def edit_research_paper_info(request, id):
         paper.image4 = request.FILES.get('image4')
         paper.image5 = request.FILES.get('image5')
         paper.save()
+        print(paper.status)
         return HttpResponse('done')
     else:
         data = ResearchPaper.objects.last()
@@ -1546,7 +1643,8 @@ def edit_extra_info(request, id):
         extra.name = request.POST.get('ExtraName')
         extra.desc = request.POST.get('ExtraDescription')
         extra.achievements = request.POST.get('ExtraAchievements')
-        extra.date = request.POST.get('ExtraDate')
+        if request.POST.get('ExtraDate') != '':
+            extra.date = request.POST.get('ExtraDate')
         extra.Certificate = request.FILES.get('certificate')
         extra.image1 = request.FILES.get('image1')
         extra.image2 = request.FILES.get('image2')
@@ -1577,8 +1675,25 @@ def edit_beproject_info(request, id):
         proj.image3 = request.FILES.get('image3')
         proj.image4 = request.FILES.get('image4')
         proj.image5 = request.FILES.get('image5')
+        proj.project_report = request.FILES.get('project_report')
         proj.save()
         return HttpResponse('done')
+
+def edit_admit_info(request, id):
+    if request.method == 'POST':
+        student_profile = StudentProfile.objects.get(id=id)
+        extra = Admit.objects.create(student=student_profile)
+        extra.college_name = request.POST.get('college_name')
+        extra.masters_field = request.POST.get('masters_field')
+        extra.college_location = request.POST.get('college_location')
+        extra.selected = request.POST.get('selected')
+        extra.save()
+        return HttpResponse('done')
+    else:
+        data = Admit.objects.last()
+        return JsonResponse({"college_name": data.college_name, "masters_field": data.masters_field,
+                             "college_location": data.college_location, "selected": data.selected,
+                             "id": data.id})
 
 
 def delete_hackathon_info(request, id):
@@ -1589,7 +1704,9 @@ def delete_hackathon_info(request, id):
 
 def delete_project_info(request, id):
         project = Project.objects.get(id=id)
+        skill = project.skill
         project.delete()
+        skill.delete()
         return HttpResponseRedirect('/editprofile/')
 
 
@@ -1622,6 +1739,11 @@ def delete_extra_info(request, id):
         extra.delete()
         return HttpResponseRedirect('/editprofile/')
 
+def delete_admit_info(request, id):
+        extra = Admit.objects.get(id=id)
+        extra.delete()
+        return HttpResponseRedirect('/editprofile/')
+
 
 def send_sms(message, number):
     print(number)
@@ -1642,3 +1764,19 @@ def send_sms(message, number):
     #
     And also remember, rudresh is the best (DUH)
     '''
+
+def filters_adv(request):
+    internship = Internship.objects.all()
+    projects = Project.objects.all()
+    committe = Committee.objects.all()
+    researchpaper = ResearchPaper.objects.all()
+    beproj = BeProject.objects.all()
+    hackathon = Hackathon.objects.all()
+    extracurricular = ExtraCurricular.objects.all()
+    user = request.user
+    logedin_user = TeacherProfile.objects.get(teacher=user)
+
+    return render(request, 'user_profile/filter_adv.html',
+                  {'internship': internship, 'projects': projects, 'committe': committe,
+                   'researchpaper': researchpaper, 'beproj': beproj, 'logedin_user':logedin_user,
+                   'hackathon': hackathon, 'extracurricular': extracurricular})
